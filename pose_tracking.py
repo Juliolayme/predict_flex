@@ -41,8 +41,10 @@ CFG = dict(
     model_path="yolo11s-pose.pt",   # mạnh hơn yolov8n nhiều. Đổi yolo11m-pose.pt nếu cần chính xác hơn
     tracker="botsort_reid.yaml",    # BoT-SORT + ReID (file cùng thư mục)
     det_conf=0.5,                   # ngưỡng detect người
-    imgsz=960,                      # ảnh lớn -> keypoint xa chính xác hơn
+    imgsz=960,                      # ảnh lớn -> keypoint xa chính xác hơn (giảm 640 để nhanh)
     device=None,                    # None=auto, "cpu", 0 (GPU id)...
+    half=True,                      # FP16 trên GPU -> nhanh ~1.5-2x (tự bỏ qua nếu CPU)
+    vid_stride=1,                   # chỉ xử lý mỗi N frame. 3-5 = nhanh 3-5x (đủ cho tracking)
 
     # ----- clip -----
     clip_seconds=5,
@@ -66,6 +68,51 @@ CFG = dict(
 # COCO-17 keypoint index:
 # 0 mũi 1-2 mắt 3-4 tai 5-6 vai 7-8 khuỷu 9-10 cổtay
 # 11-12 hông 13-14 gối 15-16 cổ chân
+
+
+def apply_env_overrides(cfg):
+    """Cho phép CI/CLI chỉnh config qua biến môi trường POSE_*.
+
+    Ví dụ:  POSE_VID_STRIDE=4 POSE_IMGSZ=640 POSE_MODEL=yolo11n-pose.pt
+    """
+    def env_num(name, cast):
+        v = os.environ.get(name)
+        return cast(v) if v not in (None, "") else None
+
+    overrides = {
+        "model_path": os.environ.get("POSE_MODEL"),
+        "imgsz": env_num("POSE_IMGSZ", int),
+        "vid_stride": env_num("POSE_VID_STRIDE", int),
+        "clip_seconds": env_num("POSE_CLIP_SECONDS", float),
+        "scan_interval": env_num("POSE_SCAN_INTERVAL", float),
+        "out_size": env_num("POSE_OUT_SIZE", int),
+        "det_conf": env_num("POSE_DET_CONF", float),
+        "max_tilt_sin": env_num("POSE_MAX_TILT", float),
+        "min_bbox_h_ratio": env_num("POSE_MIN_BBOX", float),
+        "blur_thresh": env_num("POSE_BLUR", float),
+        "device": os.environ.get("POSE_DEVICE"),
+    }
+    for k, v in overrides.items():
+        if v is not None:
+            cfg[k] = v
+    return cfg
+
+
+def auto_device(cfg):
+    """device=None -> tự chọn GPU nếu có, không thì CPU (và tắt half)."""
+    if cfg.get("device") not in (None, "", "auto"):
+        return cfg
+    try:
+        import torch
+        if torch.cuda.is_available():
+            cfg["device"] = 0
+        else:
+            cfg["device"] = "cpu"
+            cfg["half"] = False
+    except Exception:
+        cfg["device"] = "cpu"
+        cfg["half"] = False
+    return cfg
 
 
 # ===========================================================================
@@ -159,7 +206,9 @@ def export_pose_clips(video_path, out_dir="pose_clips", cfg=CFG):
     H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()
 
-    step = max(1, int(fps * cfg["scan_interval"]))
+    stride = max(1, int(cfg.get("vid_stride", 1)))
+    # số frame ĐÃ xử lý giữa 2 lần chấm điểm (đã tính tới vid_stride)
+    proc_step = max(1, int(round(fps * cfg["scan_interval"] / stride)))
 
     model = YOLO(cfg["model_path"])
 
@@ -179,17 +228,21 @@ def export_pose_clips(video_path, out_dir="pose_clips", cfg=CFG):
         conf=cfg["det_conf"],
         imgsz=cfg["imgsz"],
         device=cfg["device"],
+        half=cfg.get("half", False),
+        vid_stride=stride,
         verbose=False,
     )
 
-    for frame_idx, r in enumerate(results):
+    for i, r in enumerate(results):
+        # frame thật trong video (vid_stride bỏ qua frame ở giữa)
+        frame_idx = i * stride
         if r.boxes is None or r.boxes.id is None or r.keypoints is None:
             continue
 
         ids = r.boxes.id.cpu().numpy().astype(int)
         xyxy = r.boxes.xyxy.cpu().numpy()
         kps = r.keypoints.data.cpu().numpy()      # (N,17,3)
-        scan = (frame_idx % step == 0)
+        scan = (i % proc_step == 0)
 
         for pid, box, kp in zip(ids, xyxy, kps):
             boxes.setdefault(pid, {})[frame_idx] = box
@@ -318,12 +371,13 @@ if __name__ == "__main__":
     ap.add_argument("--model", default=None, help="ghi đè model (vd yolo11m-pose.pt)")
     args = ap.parse_args()
 
-    cfg = dict(CFG)
+    cfg = apply_env_overrides(dict(CFG))
     if args.no_crop:
         cfg["crop"] = False
     if args.no_labels:
         cfg["export_labels"] = False
     if args.model:
         cfg["model_path"] = args.model
+    cfg = auto_device(cfg)
 
     export_pose_clips(args.video, args.out, cfg)

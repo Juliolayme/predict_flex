@@ -1,0 +1,116 @@
+name: pose-extract
+
+# Mỗi folder trong folders.json -> 1 job (matrix). Mỗi job:
+#   tải video từ Google Drive (rclone) -> chạy pose tracking -> up clip lên artifact.
+#
+# YÊU CẦU:
+#   - Secret RCLONE_CONF : nội dung file ~/.config/rclone/rclone.conf có remote tên "gdrive"
+#     (tạo bằng: rclone config  -> Google Drive -> rồi `cat ~/.config/rclone/rclone.conf`)
+#   - folders.json       : danh sách { "name", "id" } (id = Drive folder id)
+#
+# ⚠️ Runner FREE của GitHub KHÔNG có GPU và giới hạn 6h/job -> chỉ hợp để test/đoạn ngắn.
+#    Cho vài trăm giờ video: dùng SELF-HOSTED GPU runner bằng cách đặt input "runner"
+#    = label runner của bạn (vd "gpu"). Khi đó không dính giới hạn 6h.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner (ubuntu-latest hoặc label self-hosted GPU)"
+        default: "ubuntu-latest"
+      model:
+        description: "Model pose"
+        default: "yolo11s-pose.pt"
+      imgsz:
+        description: "Kích thước ảnh inference (640 nhanh, 960 chính xác)"
+        default: "640"
+      vid_stride:
+        description: "Xử lý mỗi N frame (4-5 = nhanh hơn nhiều)"
+        default: "4"
+
+jobs:
+  # ---- 1. Đọc folders.json -> tạo matrix ----
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: set
+        run: echo "matrix={\"folder\":$(jq -c . folders.json)}" >> "$GITHUB_OUTPUT"
+
+  # ---- 2. Mỗi folder 1 job ----
+  process:
+    needs: setup
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      max-parallel: 6          # số job folder chạy song song
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    timeout-minutes: 350       # ~6h (self-hosted có thể tăng)
+    env:
+      POSE_MODEL: ${{ inputs.model }}
+      POSE_IMGSZ: ${{ inputs.imgsz }}
+      POSE_VID_STRIDE: ${{ inputs.vid_stride }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # libGL cho opencv (runner headless)
+      - name: System deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgl1 libglib2.0-0 rclone
+
+      - name: Python deps
+        run: pip install -q ultralytics
+
+      - name: Cấu hình rclone (Google Drive)
+        run: |
+          mkdir -p ~/.config/rclone
+          printf '%s' "${{ secrets.RCLONE_CONF }}" > ~/.config/rclone/rclone.conf
+
+      # khôi phục kết quả lần trước -> RESUME (bỏ qua video đã xong)
+      - name: Restore cache
+        uses: actions/cache@v4
+        with:
+          path: out/${{ matrix.folder.name }}
+          key: pose-out-${{ matrix.folder.name }}-${{ github.run_id }}
+          restore-keys: pose-out-${{ matrix.folder.name }}-
+
+      # tải + xử lý TỪNG video (tiết kiệm disk: xong xoá ngay)
+      - name: Process folder ${{ matrix.folder.name }}
+        env:
+          FOLDER_ID: ${{ matrix.folder.id }}
+          NAME: ${{ matrix.folder.name }}
+        run: |
+          set -e
+          OUT="out/$NAME"
+          mkdir -p "$OUT" tmpvid
+          rclone lsf "gdrive:" --drive-root-folder-id "$FOLDER_ID" \
+            --include "*.mp4" --include "*.mov" --include "*.mkv" --include "*.flv" \
+            > files.txt || true
+          echo "Video trong folder:"; cat files.txt
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            stem="${f%.*}"
+            if [ -d "$OUT/$stem" ]; then
+              echo "SKIP (đã xong): $f"; continue
+            fi
+            echo "==== $f ===="
+            rm -rf tmpvid && mkdir -p tmpvid
+            rclone copy "gdrive:$f" tmpvid --drive-root-folder-id "$FOLDER_ID" -P
+            python pose_tracking.py "tmpvid/$f" -o "$OUT/$stem" || echo "LỖI ở $f, bỏ qua"
+            rm -rf tmpvid
+          done < files.txt
+
+      - name: Upload clips (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: clips-${{ matrix.folder.name }}
+          path: out/${{ matrix.folder.name }}
+          retention-days: 14
+          if-no-files-found: warn
