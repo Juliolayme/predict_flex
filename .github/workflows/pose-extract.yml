@@ -11,16 +11,17 @@ name: pose-extract
 #    Vài trăm giờ -> dùng SELF-HOSTED runner (vd máy có ổ D 100GB): chạy workflow
 #    với input runner = label runner của bạn (vd "self-hosted").
 
-# SELF-HOSTED WINDOWS: cài runner vào ổ D (vd D:\actions-runner) -> mọi dữ liệu
-# (videos/, out/) nằm trên ổ D. Máy cần cài sẵn Git for Windows (kèm Git Bash)
-# và Python 3.11+. Nếu có GPU NVIDIA: cài torch bản CUDA để chạy nhanh.
+# Chạy trên runner WINDOWS do GitHub cung cấp (windows-latest). Workspace của
+# runner này nằm sẵn trên ổ D: (D:\a\...), đã có Git Bash + Python.
+# Lưu ý: runner hosted KHÔNG có GPU và giới hạn 6h/job + ~14GB disk
+# -> hợp test/folder vừa; vài trăm giờ nên dùng self-hosted có GPU.
 
 on:
   workflow_dispatch:
     inputs:
       runner:
-        description: "Runner (ubuntu-latest hoặc label self-hosted Windows)"
-        default: "ubuntu-latest"
+        description: "Runner (windows-latest / ubuntu-latest / self-hosted)"
+        default: "windows-latest"
       model:
         description: "Model pose"
         default: "yolo11s-pose.pt"
