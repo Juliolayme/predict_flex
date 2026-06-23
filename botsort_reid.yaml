@@ -1,0 +1,25 @@
+# =====================================================================
+# BoT-SORT + ReID tracker config (chống đổi/hoán ID khi người che nhau)
+# Yêu cầu ultralytics >= 8.3.x để hỗ trợ with_reid + model: auto
+# =====================================================================
+tracker_type: botsort
+
+# Ngưỡng association
+track_high_thresh: 0.5     # det conf cao -> match vòng 1
+track_low_thresh: 0.1      # det conf thấp -> match vòng 2 (cứu track sắp mất)
+new_track_thresh: 0.6      # conf tối thiểu để mở track mới
+match_thresh: 0.8          # ngưỡng IoU match
+
+# track_buffer lớn -> giữ ID khi người bị khuất lâu rồi xuất hiện lại
+track_buffer: 90
+
+fuse_score: true           # gộp conf vào ma trận cost
+
+# Global motion compensation: bù rung/chuyển động camera
+gmc_method: sparseOptFlow
+
+# ----- ReID (appearance) : mấu chốt để KHÔNG trộn ID -----
+proximity_thresh: 0.5
+appearance_thresh: 0.25
+with_reid: true
+model: auto                # auto = dùng feature từ chính model YOLO
