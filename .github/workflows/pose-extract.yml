@@ -1,0 +1,121 @@
+name: pose-extract
+
+# Mỗi folder trong folders.json -> 1 job (matrix), tối đa 20 job chạy song song.
+# Mỗi job: tải video PUBLIC từ Google Drive bằng gdown (KHÔNG cần đăng nhập)
+#          -> chạy pose tracking đa luồng -> mỗi video 1 thư mục
+#          -> up toàn bộ clip lên artifact (kể cả khi job fail).
+#
+# Yêu cầu: các folder Drive đang để "Bất kỳ ai có đường liên kết" xem được.
+#
+# ⚠️ Runner FREE: không GPU + 6h/job. Hợp test hoặc folder nhỏ.
+#    Vài trăm giờ -> dùng SELF-HOSTED runner (vd máy có ổ D 100GB): chạy workflow
+#    với input runner = label runner của bạn (vd "self-hosted").
+
+# Chạy trên runner WINDOWS do GitHub cung cấp (windows-latest). Workspace của
+# runner này nằm sẵn trên ổ D: (D:\a\...), đã có Git Bash + Python.
+# Lưu ý: runner hosted KHÔNG có GPU và giới hạn 6h/job + ~14GB disk
+# -> hợp test/folder vừa; vài trăm giờ nên dùng self-hosted có GPU.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner (windows-latest / ubuntu-latest / self-hosted)"
+        default: "windows-latest"
+      model:
+        description: "Model pose"
+        default: "yolo11s-pose.pt"
+      imgsz:
+        description: "Kích thước inference (640 nhanh / 960 chính xác)"
+        default: "640"
+      vid_stride:
+        description: "Xử lý mỗi N frame (4-5 = nhanh hơn)"
+        default: "4"
+      workers:
+        description: "Số video xử lý song song trong 1 job (đa luồng)"
+        default: "2"
+
+jobs:
+  # ---- 1. Đọc folders.json -> tạo matrix ----
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: set
+        run: echo "matrix={\"folder\":$(jq -c . folders.json)}" >> "$GITHUB_OUTPUT"
+
+  # ---- 2. Mỗi folder 1 job, tối đa 20 job song song ----
+  process:
+    needs: setup
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    timeout-minutes: 350
+    defaults:
+      run:
+        shell: bash          # Windows dùng Git Bash -> script chạy chung 1 kiểu
+    env:
+      POSE_MODEL: ${{ inputs.model }}
+      POSE_IMGSZ: ${{ inputs.imgsz }}
+      POSE_VID_STRIDE: ${{ inputs.vid_stride }}
+      POSE_WORKERS: ${{ inputs.workers }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: System deps (libGL cho opencv) - chỉ Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgl1 libglib2.0-0
+
+      - name: Python deps
+        run: pip install -q ultralytics gdown
+
+      # khôi phục kết quả lần trước -> RESUME (bỏ qua video đã xong)
+      - name: Restore cache
+        uses: actions/cache@v4
+        with:
+          path: out/${{ matrix.folder.name }}
+          key: pose-out-${{ matrix.folder.name }}-${{ github.run_id }}
+          restore-keys: pose-out-${{ matrix.folder.name }}-
+
+      - name: Tải video PUBLIC (gdown, không đăng nhập)
+        env:
+          FOLDER_ID: ${{ matrix.folder.id }}
+        run: |
+          set -e
+          mkdir -p videos
+          for i in 1 2 3; do
+            gdown --folder "https://drive.google.com/drive/folders/${FOLDER_ID}" \
+              -O videos --remaining-ok && break
+            echo "gdown thử lại ($i)..."; sleep 5
+          done
+          echo "Đã tải:"; ls -R videos || true
+
+      - name: Pose tracking (đa luồng, mỗi video 1 thư mục)
+        env:
+          NAME: ${{ matrix.folder.name }}
+        run: |
+          python batch_run.py \
+            --input-dir videos \
+            --out-dir "out/${NAME}" \
+            --workers "${POSE_WORKERS:-2}" \
+            --delete-source
+
+      # up artifact DÙ JOB PASS HAY FAIL
+      - name: Upload clips (artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clips-${{ matrix.folder.name }}
+          path: out/${{ matrix.folder.name }}
+          retention-days: 14
+          if-no-files-found: warn
