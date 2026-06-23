@@ -11,11 +11,15 @@ name: pose-extract
 #    Vài trăm giờ -> dùng SELF-HOSTED runner (vd máy có ổ D 100GB): chạy workflow
 #    với input runner = label runner của bạn (vd "self-hosted").
 
+# SELF-HOSTED WINDOWS: cài runner vào ổ D (vd D:\actions-runner) -> mọi dữ liệu
+# (videos/, out/) nằm trên ổ D. Máy cần cài sẵn Git for Windows (kèm Git Bash)
+# và Python 3.11+. Nếu có GPU NVIDIA: cài torch bản CUDA để chạy nhanh.
+
 on:
   workflow_dispatch:
     inputs:
       runner:
-        description: "Runner (ubuntu-latest hoặc label self-hosted)"
+        description: "Runner (ubuntu-latest hoặc label self-hosted Windows)"
         default: "ubuntu-latest"
       model:
         description: "Model pose"
@@ -50,6 +54,9 @@ jobs:
       max-parallel: 20
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
     timeout-minutes: 350
+    defaults:
+      run:
+        shell: bash          # Windows dùng Git Bash -> script chạy chung 1 kiểu
     env:
       POSE_MODEL: ${{ inputs.model }}
       POSE_IMGSZ: ${{ inputs.imgsz }}
@@ -62,7 +69,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: System deps (libGL cho opencv)
+      - name: System deps (libGL cho opencv) - chỉ Linux
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libgl1 libglib2.0-0
