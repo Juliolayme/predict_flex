@@ -95,7 +95,7 @@ jobs:
           mkdir -p videos
           for i in 1 2 3; do
             gdown --folder "https://drive.google.com/drive/folders/${FOLDER_ID}" \
-              -O videos --remaining-ok && break
+              -O videos && break
             echo "gdown thử lại ($i)..."; sleep 5
           done
           echo "Đã tải:"; ls -R videos || true
